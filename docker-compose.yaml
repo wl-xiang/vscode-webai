@@ -1,4 +1,4 @@
-# code-server AI 开发环境 — 一键编排
+# vscode-webai — 浏览器版 VS Code + opencode + 多语言运行时的开发环境
 # 用法:
 #   启动:   docker compose up -d
 #   停止:   docker compose down          (数据都在 ./volumes/, 不会丢)
@@ -6,30 +6,57 @@
 # 所有持久化数据统一放在 ./volumes/ 下
 services:
   code-server:
-    image: code-server-ai:latest
+    image: vscode-webai:latest
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: code-server-ai
+    container_name: vscode-webai
     restart: unless-stopped
     ports:
       # 办公老 PC 需要浏览器访问 → 暴露到局域网; 仅本机访问可改回 "127.0.0.1:8080:8080"
-      - "8080:8080"
+      # 宿主机端口可用环境变量覆盖 (默认 8080): CODE_SERVER_PORT=8081 docker compose up -d
+      # (若宿主机 8080 已被占用, 在项目根目录放一个 .env 写 CODE_SERVER_PORT=8081 即可)
+      - "${CODE_SERVER_PORT:-8080}:8080"
     environment:
-      - PASSWORD=root1206
+      - PASSWORD=root1234
       - TZ=Asia/Shanghai
     volumes:
-      # 项目代码
+      # ---------- 项目代码 ----------
       - ./volumes/workspace:/home/coder/project
-      # code-server 数据与配置 (VSIX 扩展、用户设置, 重建容器不丢)
+
+      # ---------- code-server 数据与配置 (VSIX 扩展、用户设置, 重建容器不丢) ----------
       - ./volumes/code-server-data:/home/coder/.local/share/code-server
       - ./volumes/code-server-config:/home/coder/.config/code-server
-      # opencode 全局配置 + skills (~/.config/.opencode/skills)
-      - ./volumes/opencode-config:/home/coder/.config/.opencode
+
+      # ---------- 用户 shell 配置持久化 (~/.bashrc) ----------
+      # 同一份宿主机文件 (./config/bashrc) 同时挂到两个 HOME:
+      #   /home/coder/.bashrc  镜像默认运行用户 coder(uid 1000) 的 ~/.bashrc ← 日常生效的就是这份
+      #   /root/.bashrc        以 root 进容器时 (docker exec -u root) 生效的那份
+      # 在容器里 `vim ~/.bashrc` 改的即宿主机文件, 重建容器/换镜像都不会丢。
+      # 首次部署后如 coder 无法写入, 在服务器上执行一次: sudo chown 1000:1000 config/bashrc
+      - ./config/bashrc:/home/coder/.bashrc
+      - ./config/bashrc:/root/.bashrc
+
+      # ---------- opencode ----------
+      # 【opencode 二进制位置, 二选一】
+      #   A. 镜像内烧录   : /usr/local/bin/opencode     ← 仅构建时 install-opencode=true 才有
+      #   B. 热升级卷挂载 : /opt/opencode/bin/opencode  ← 下面这条, PATH 里优先级更高
+      # 升级 opencode: 把新二进制放到宿主机 ./volumes/opencode-binary/opencode,
+      # 然后 `docker compose up -d` 即可, **不需要重建镜像**。
+      # 卷为空时自动回退到镜像内的 /usr/local/bin/opencode (若构建时预装过)。
+      - ./volumes/opencode-binary:/opt/opencode/bin
+      # opencode 全局配置 + skills
+      # 注意: 全局配置目录是 ~/.config/opencode (无前导点), 不是 .opencode ——
+      # 官方文档明确 "NOT ~/.opencode/"; 带点的 .opencode 只在项目内使用
+      # (项目根目录的 .opencode/skills、.opencode/agent)。
+      # 全局 skills / agent / command 分别落在 ~/.config/opencode/{skills,agent,command}/
+      - ./volumes/opencode-config:/home/coder/.config/opencode
       # opencode 运行数据 (状态、会话、自动安装的依赖)
       - ./volumes/opencode-share:/home/coder/.local/share/opencode
       # opencode 缓存 (node_modules 类内容)
       - ./volumes/opencode-cache:/home/coder/.cache/opencode
+
+      # ---------- 依赖安装点与离线缓存 ----------
       # AI CLI / MCP CLI 安装点: npm 全局前缀已指向 ~/.local,
       # 容器里 `npm i -g xxx` 直接落到宿主机 ./volumes/local-bin, 免 sudo 且可持久化
       - ./volumes/local-bin:/home/coder/.local
@@ -41,8 +68,6 @@ services:
       - ./volumes/python-wheels:/home/coder/wheels
       # Go 包与构建缓存 (GOPATH, 含 pkg/mod 模块缓存)
       - ./volumes/go-workspace:/home/coder/go
-      # (可选) 热升级 opencode: 放好新二进制后取消下行注释, `docker compose up -d` 即生效
-      # - ./opencode-bin-cli/opencode-linux-x64:/usr/local/bin/opencode:ro
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
       interval: 30s

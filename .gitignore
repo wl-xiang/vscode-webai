@@ -4,8 +4,10 @@
 results/
 logs/
 
-# opencode 原生二进制（按架构下载，不进 Git）
-opencode-bin-cli/
+# opencode 原生二进制（按架构下载，不进 Git；仅保留目录占位文件）
+# 注意: 目录本身必须存在, 否则 Dockerfile 的 `COPY opencode-bin-cli/` 会失败
+opencode-bin-cli/*
+!opencode-bin-cli/.gitkeep
 
 # 运行时数据挂载目录（docker compose up 自动生成）
 volumes/
@@ -15,11 +17,15 @@ code-server-config/
 opencode-config/
 opencode-share/
 opencode-cache/
+opencode-binary/
 local-bin/
 npm-cache/
 pip-cache/
 python-wheels/
 go-workspace/
+
+# 本地 compose 覆盖 (如 CODE_SERVER_PORT), 不含敏感信息但属本机环境, 不入库
+.env
 
 # 系统与编辑器杂项
 .DS_Store

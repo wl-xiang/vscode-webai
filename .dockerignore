@@ -1,3 +1,12 @@
-# 只把 opencode 二进制 (目标架构那个) 带进构建上下文, 其余全部忽略
+# 构建上下文最小化: 只把这几类东西带进 docker build, 其余全部忽略
+#   1) opencode 二进制 (可选预装; 目录里平时只有 .gitkeep)
+#   2) config/bashrc        → 镜像内默认 ~/.bashrc
+#   3) config/HOME-README.md → 镜像内 ~/README.md (HOME 目录说明)
+#   4) test-oracle-instantclient.sh → 镜像内自检脚本
 *
-!opencode-bin-cli/*
+!opencode-bin-cli
+!opencode-bin-cli/**
+!config
+!config/bashrc
+!config/HOME-README.md
+!test-oracle-instantclient.sh

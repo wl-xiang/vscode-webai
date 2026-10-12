@@ -1,5 +1,5 @@
 # 构建镜像: Actions 页面 → "Build Docker Image" → Run workflow,
-# 选择目标部署服务器架构 (默认 x86_64), 跑完在运行页下载 tar artifact
+# 选择目标部署架构 (默认 x86_64) / 是否预装 opencode, 跑完在运行页下载 tar artifact
 name: Build Docker Image
 
 on:
@@ -12,12 +12,20 @@ on:
           - x86_64
           - arm64
         default: x86_64
+      install-opencode:
+        description: 'Bake opencode into the image (unchecked = skip; mount a binary at /opt/opencode/bin/opencode at runtime instead)'
+        type: boolean
+        default: false
+      opencode-version:
+        description: 'opencode version (empty = npm latest; only used when "Bake opencode" is checked)'
+        required: false
+        default: ''
       image-tag:
         description: 'Image tag'
         required: false
         default: latest
-      opencode-version:
-        description: 'opencode version (empty = npm latest)'
+      oic-url:
+        description: 'Oracle Instant Client Basic zip URL (empty = public default per arch; Oracle 11g needs this)'
         required: false
         default: ''
       archive-format:
@@ -49,11 +57,17 @@ jobs:
         with:
           arch: ${{ inputs.arch || 'x86_64' }}
           image-tag: ${{ inputs.image-tag || 'latest' }}
+          install-opencode: ${{ inputs.install-opencode }}
           opencode-version: ${{ inputs.opencode-version }}
+          oic-url: ${{ inputs.oic-url }}
           archive-format: ${{ inputs.archive-format || 'tgz' }}
 
       - name: Job summary
         shell: bash
+        env:
+          OC_INSTALLED: ${{ steps.build.outputs.opencode-installed }}
+          OC_VERSION: ${{ steps.build.outputs.opencode-version }}
+          OC_PATH: ${{ steps.build.outputs.opencode-path }}
         run: |
           {
             echo "## Build artifacts"
@@ -65,6 +79,14 @@ jobs:
             echo "| Platform | \`${{ steps.build.outputs.platform }}\` |"
             echo "| Archive | \`${{ steps.build.outputs.archive-path }}\` |"
             echo "| SHA256 | \`${{ steps.build.outputs.archive-sha256 }}\` |"
+            echo
+            echo "### opencode"
+            echo "| Item | Value |"
+            echo "|---|---|"
+            echo "| Baked into image | \`${OC_INSTALLED}\` |"
+            echo "| Version | \`${OC_VERSION:-<none>}\` |"
+            echo "| Binary path in image | \`${OC_PATH:-<none>}\` |"
+            echo "| Hot-upgrade mount point | \`/opt/opencode/bin/opencode\` |"
             echo
             echo "### Source Code"
             echo "| Item | Value |"

@@ -1,9 +1,10 @@
-# code-server AI 开发环境镜像 — 构建 action
+# vscode-webai 镜像 — 构建 action
 #
 # 用法 (本仓库自带 .github/workflows/build.yml 调用; 其他仓库也可 uses: <owner>/<repo>@<ref>):
 #   - uses: ./
 #     with:
-#       arch: x86_64        # 目标部署服务器架构, 默认 x86_64, 可选 arm64
+#       arch: x86_64          # 目标部署服务器架构, 默认 x86_64, 可选 arm64
+#       install-opencode: false  # 是否把 opencode 二进制预装进镜像, 默认 false
 #
 # 形态参考:
 #   - JamesIves/github-pages-deploy-action / peaceiris/actions-gh-pages:
@@ -12,15 +13,14 @@
 #
 # 行为:
 #   1. 归一化 arch -> linux/amd64 | linux/arm64 (跨架构自动挂 QEMU)
-#   2. opencode 二进制 (gitignore 不入库) 按架构从 npm 平台包自动下载,
-#      已预置在 opencode-bin-cli/ 则跳过
+#   2. 按 install-opencode 决定是否把 opencode 二进制放进构建上下文
+#      (true: 按架构从 npm 平台包拉最新版 / 指定版本; false: 只留 .gitkeep 占位)
 #   3. docker buildx build --platform <arch> --load
-#   4. docker save 导出带架构后缀的 tar + sha256 (命名与 build.sh 一致:
-#      code-server-ai_amd64.tar), 服务器 docker load -i 导入
+#   4. docker save 导出带架构后缀的 tar + sha256, 服务器 docker load -i 导入
 #   5. tar 与 sha256 作为 workflow artifact 上传
 name: 'Build Docker Image'
-description: 'Build the code-server AI dev environment Docker image for the target deployment server architecture (x86_64 or arm64) and export a docker-load-able tar artifact.'
-author: 'code-server-ai'
+description: 'Build the vscode-webai Docker image (code-server + agent runtimes + Oracle Instant Client) and export a docker-load-able tar artifact.'
+author: 'vscode-webai'
 
 branding:
   icon: 'package'
@@ -37,7 +37,7 @@ inputs:
   image-name:
     description: 'Name to tag the built image with.'
     required: false
-    default: 'code-server-ai'
+    default: 'vscode-webai'
   image-tag:
     description: 'Tag to tag the built image with.'
     required: false
@@ -53,9 +53,13 @@ inputs:
     required: false
     default: 'Dockerfile'
 
-  # ---- opencode 二进制 (其余 gitignore) ----
+  # ---- opencode 二进制 ----
+  install-opencode:
+    description: 'Bake the opencode binary into the image. Default false. When false the image ships without opencode and you supply it at runtime by mounting a binary at /opt/opencode/bin/opencode (hot upgrade, no image rebuild).'
+    required: false
+    default: 'false'
   opencode-version:
-    description: 'opencode version to fetch from the npm platform package (opencode-linux-x64 / opencode-linux-arm64). Empty = latest. Skipped if the binary for the target arch is already present under <context>/opencode-bin-cli/.'
+    description: 'opencode version to fetch from the npm platform package (opencode-linux-x64 / opencode-linux-arm64) when install-opencode is true. Empty = latest. Ignored when install-opencode is false.'
     required: false
     default: ''
 
@@ -69,11 +73,15 @@ inputs:
     required: false
     default: ''
   python-url:
-    description: 'Build-arg PYTHON_URL: python-build-standalone tarball URL. Empty = auto latest 3.14.x.'
+    description: 'Build-arg PYTHON_URL: python-build-standalone tarball URL. Empty = auto latest 3.13.x.'
     required: false
     default: ''
   apt-mirror:
     description: 'Build-arg APT_MIRROR: substitute apt mirror host (e.g. mirrors.aliyun.com). Empty = official Debian sources.'
+    required: false
+    default: ''
+  oic-url:
+    description: 'Build-arg OIC_URL: full Oracle Instant Client Basic zip URL. Empty = public default per arch (x64 21.23 / arm64 19.32). Needed for Oracle 11g (11.2) which is behind the OTN login wall.'
     required: false
     default: ''
 
@@ -89,19 +97,28 @@ inputs:
 
 outputs:
   image:
-    description: 'Built image reference, e.g. code-server-ai:latest.'
+    description: 'Built image reference, e.g. vscode-webai:latest.'
     value: ${{ steps.build.outputs.image }}
   platform:
     description: 'Resolved Docker platform, e.g. linux/amd64.'
     value: ${{ steps.resolve.outputs.platform }}
+  opencode-installed:
+    description: "Whether opencode was baked into the image: 'true' or 'false'."
+    value: ${{ steps.opencode.outputs.opencode-installed }}
+  opencode-version:
+    description: 'opencode version baked into the image (empty when not installed).'
+    value: ${{ steps.opencode.outputs.opencode-version }}
+  opencode-path:
+    description: 'Path of the opencode binary inside the image (empty when not installed). Hot-upgrade mount point: /opt/opencode/bin/opencode.'
+    value: ${{ steps.opencode.outputs.opencode-path }}
   archive-path:
-    description: 'Path of the exported docker image archive, e.g. code-server-ai_docker-images_amd64.tgz.'
+    description: 'Path of the exported docker image archive, e.g. vscode-webai_docker-images_amd64.tgz.'
     value: ${{ steps.export.outputs.archive-path }}
   archive-sha256:
     description: 'SHA256 checksum of the docker image archive.'
     value: ${{ steps.export.outputs.archive-sha256 }}
   source-path:
-    description: 'Path of the source code archive, e.g. code-server-ai_source.tgz.'
+    description: 'Path of the source code archive, e.g. vscode-webai_source.tgz.'
     value: ${{ steps.source.outputs.source-path }}
   source-sha256:
     description: 'SHA256 checksum of the source code archive.'
@@ -135,41 +152,56 @@ runs:
     - name: Set up Docker Buildx
       uses: docker/setup-buildx-action@v3
 
-    # 3. opencode 二进制: 按目标架构放入构建上下文
-    #    (opencode-bin-cli/ 不入 Git; GitHub Releases 已不放 Linux 包, 官方渠道是 npm 平台包)
-    - name: Fetch opencode binary for target arch
+    # 3. opencode 二进制 (可选预装; 勾选 install-opencode=true 时才拉取)
+    #    GitHub Releases 已不放 Linux 包, 官方渠道是 npm 平台包。
+    #    只有本步骤把二进制写进 opencode-bin-cli/ 时, Dockerfile 才会烧录到
+    #    /usr/local/bin/opencode; 否则镜像不含 opencode, 靠运行时卷挂载。
+    - name: Resolve opencode binary
+      id: opencode
       shell: bash
       env:
         DOCKER_ARCH: ${{ steps.resolve.outputs.docker-arch }}
         OPENCODE_VERSION: ${{ inputs.opencode-version }}
+        INSTALL_OPENCODE: ${{ inputs.install-opencode }}
         CONTEXT: ${{ inputs.context }}
       run: |
         set -euo pipefail
+        OC_DIR="$CONTEXT/opencode-bin-cli"
+        mkdir -p "$OC_DIR"
+
+        # 始终清掉旧产物, 只保留 .gitkeep 占位 (Dockerfile 的 COPY 需要目录存在)
+        find "$OC_DIR" -maxdepth 1 -type f ! -name '.gitkeep' -delete
+
         case "$DOCKER_ARCH" in
           amd64) OC_ARCH=x64 ;;
           arm64) OC_ARCH=arm64 ;;
         esac
-        mkdir -p "$CONTEXT/opencode-bin-cli"
-        DEST="$CONTEXT/opencode-bin-cli/opencode-linux-$OC_ARCH"
 
-        if [ -f "$DEST" ]; then
-          echo "Using pre-placed $DEST"
-        else
-          if [ -z "$OPENCODE_VERSION" ]; then
-            OPENCODE_VERSION=$(curl -fsSL "https://registry.npmjs.org/opencode-linux-$OC_ARCH" \
-              | jq -r '."dist-tags".latest')
-          fi
-          echo "Downloading opencode-linux-$OC_ARCH@$OPENCODE_VERSION from npm"
-          curl -fsSL -o /tmp/opencode.tgz \
-            "https://registry.npmjs.org/opencode-linux-$OC_ARCH/-/opencode-linux-$OC_ARCH-$OPENCODE_VERSION.tgz"
-          tar -xzf /tmp/opencode.tgz -C /tmp
-          install -m 755 /tmp/package/bin/opencode "$DEST"
+        if [ "$INSTALL_OPENCODE" != "true" ]; then
+          echo "install-opencode=false -> 镜像不预装 opencode"
+          echo "运行时用 compose 的 opencode-binary 卷挂载: ./volumes/opencode-binary/opencode -> /opt/opencode/bin/opencode"
+          echo "opencode-installed=false" >> "$GITHUB_OUTPUT"
+          echo "opencode-version=" >> "$GITHUB_OUTPUT"
+          echo "opencode-path=" >> "$GITHUB_OUTPUT"
+          exit 0
         fi
 
-        # Dockerfile 用通配 COPY, 上下文里多于一个 opencode 二进制会导致构建失败,
-        # 只保留目标架构的那个
-        find "$CONTEXT/opencode-bin-cli" -maxdepth 1 -type f \
-            ! -name "opencode-linux-$OC_ARCH" -print -delete
+        if [ -z "$OPENCODE_VERSION" ]; then
+          OPENCODE_VERSION=$(curl -fsSL "https://registry.npmjs.org/opencode-linux-$OC_ARCH" \
+            | jq -r '."dist-tags".latest')
+        fi
+        echo "Downloading opencode-linux-$OC_ARCH@$OPENCODE_VERSION from npm"
+        curl -fsSL -o /tmp/opencode.tgz \
+          "https://registry.npmjs.org/opencode-linux-$OC_ARCH/-/opencode-linux-$OC_ARCH-$OPENCODE_VERSION.tgz"
+        tar -xzf /tmp/opencode.tgz -C /tmp
+        install -m 755 /tmp/package/bin/opencode "$OC_DIR/opencode"
+
+        echo "opencode => ${OC_DIR}/opencode (${OPENCODE_VERSION})"
+        echo "opencode-installed=true" >> "$GITHUB_OUTPUT"
+        echo "opencode-version=$OPENCODE_VERSION" >> "$GITHUB_OUTPUT"
+        # 记录路径: 镜像内烧录位置 + 运行时热升级挂载点
+        echo "opencode-path=/usr/local/bin/opencode" >> "$GITHUB_OUTPUT"
+        echo "::notice::opencode ${OPENCODE_VERSION} baked in at /usr/local/bin/opencode (hot-upgrade mount point: /opt/opencode/bin/opencode)"
 
     # 4. 构建 (Dockerfile 按 TARGETARCH 切换各运行时资源)
     - name: Build image
@@ -186,10 +218,12 @@ runs:
         GO_VERSION: ${{ inputs.go-version }}
         PYTHON_URL: ${{ inputs.python-url }}
         APT_MIRROR: ${{ inputs.apt-mirror }}
+        OIC_URL: ${{ inputs.oic-url }}
+        INSTALL_OPENCODE: ${{ inputs.install-opencode }}
       run: |
         set -euo pipefail
         IMAGE="$IMAGE_NAME:$IMAGE_TAG"
-        echo "Building $IMAGE for $PLATFORM"
+        echo "Building $IMAGE for $PLATFORM (install-opencode=${INSTALL_OPENCODE})"
         # 显式传 TARGETARCH: 不依赖 buildx 自动注入 (Dockerfile 里 ARG 写了默认值时
         # 自动注入会被默认值覆盖, 曾导致 arm64 构建下载了全部 x86_64 资源)
         docker buildx build \
@@ -200,6 +234,8 @@ runs:
           --build-arg "GO_VERSION=$GO_VERSION" \
           --build-arg "PYTHON_URL=$PYTHON_URL" \
           --build-arg "APT_MIRROR=$APT_MIRROR" \
+          --build-arg "OIC_URL=$OIC_URL" \
+          --build-arg "INSTALL_OPENCODE=$INSTALL_OPENCODE" \
           --tag "$IMAGE" \
           --load \
           "$CONTEXT"
@@ -292,6 +328,9 @@ runs:
         # 期间压缩归档文件才在目录内创建/增长, tar 结束时检测到 "." 已变化, 报
         # "file changed as we read it" 且退出码为 1 (是否触发取决于调度时序, 时好时坏)。
         # 因此先写入 CONTEXT 之外的临时目录, 打包完成后再移回当前目录。
+        #
+        # 注意 opencode-bin-cli/: 只排除**二进制本体**, 保留 .gitkeep 目录占位,
+        # 否则解包后重跑 `docker build` 会因为 Dockerfile 的 `COPY opencode-bin-cli/` 失败。
         STAGING_DIR="$(mktemp -d)"
         case "$COMPRESS" in
           gzip)
@@ -301,7 +340,8 @@ runs:
               --exclude='*.tgz' \
               --exclude='*.zip' \
               --exclude='*.tar' \
-              --exclude='opencode-bin-cli' \
+              --exclude='opencode' \
+              --exclude='opencode-linux-*' \
               -C "$CONTEXT" .
             ;;
           zip)
@@ -311,7 +351,10 @@ runs:
               -x '*.tgz' \
               -x '*.zip' \
               -x '*.tar' \
-              -x 'opencode-bin-cli/*')
+              -x 'opencode-bin-cli/opencode' \
+              -x 'opencode-bin-cli/opencode-linux-*' \
+              -x './opencode-bin-cli/opencode' \
+              -x './opencode-bin-cli/opencode-linux-*')
             ;;
         esac
         mv "${STAGING_DIR}/${SOURCE_ARCHIVE}" "$SOURCE_ARCHIVE"
